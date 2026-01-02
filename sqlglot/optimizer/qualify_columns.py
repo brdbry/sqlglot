@@ -121,21 +121,27 @@ def validate_qualify_columns(expression: E, sql: t.Optional[str] = None) -> E:
             unqualified_columns = scope.unqualified_columns
 
             if scope.external_columns and not scope.is_correlated_subquery and not scope.pivots:
-                column = scope.external_columns[0]
-                for_table = f" for table: '{column.table}'" if column.table else ""
-                line = column.this.meta.get("line")
-                col = column.this.meta.get("col")
-                start = column.this.meta.get("start")
-                end = column.this.meta.get("end")
+                # Filter out external columns that are inside table-valued function arguments,
+                # as these may be intentionally unresolved parameters
+                unresolved_external = [
+                    c for c in scope.external_columns if not _is_column_in_table_function_arg(c)
+                ]
+                if unresolved_external:
+                    column = unresolved_external[0]
+                    for_table = f" for table: '{column.table}'" if column.table else ""
+                    line = column.this.meta.get("line")
+                    col = column.this.meta.get("col")
+                    start = column.this.meta.get("start")
+                    end = column.this.meta.get("end")
 
-                error_msg = f"Column '{column.name}' could not be resolved{for_table}."
-                if line and col:
-                    error_msg += f" Line: {line}, Col: {col}"
-                if sql and start is not None and end is not None:
-                    formatted_sql = highlight_sql(sql, [(start, end)])[0]
-                    error_msg += f"\n  {formatted_sql}"
+                    error_msg = f"Column '{column.name}' could not be resolved{for_table}."
+                    if line and col:
+                        error_msg += f" Line: {line}, Col: {col}"
+                    if sql and start is not None and end is not None:
+                        formatted_sql = highlight_sql(sql, [(start, end)])[0]
+                        error_msg += f"\n  {formatted_sql}"
 
-                raise OptimizeError(error_msg)
+                    raise OptimizeError(error_msg)
 
             if unqualified_columns and scope.pivots and scope.pivots[0].unpivot:
                 # New columns produced by the UNPIVOT can't be qualified, but there may be columns
@@ -143,6 +149,12 @@ def validate_qualify_columns(expression: E, sql: t.Optional[str] = None) -> E:
                 # this list here to ensure those in the former category will be excluded.
                 unpivot_columns = set(_unpivot_columns(scope.pivots[0]))
                 unqualified_columns = [c for c in unqualified_columns if c not in unpivot_columns]
+
+            # Filter out unqualified columns that are inside table-valued function arguments,
+            # as these may be intentionally unresolved parameters
+            unqualified_columns = [
+                c for c in unqualified_columns if not _is_column_in_table_function_arg(c)
+            ]
 
             all_unqualified_columns.extend(unqualified_columns)
 
@@ -163,6 +175,24 @@ def validate_qualify_columns(expression: E, sql: t.Optional[str] = None) -> E:
         raise OptimizeError(error_msg)
 
     return expression
+
+
+def _is_column_in_table_function_arg(column: exp.Column) -> bool:
+    """
+    Check if a column is inside a table-valued function argument.
+
+    For example, in `SELECT * FROM foo(bar)`, the column `bar` is inside
+    the table-valued function `foo`. Such columns may be intentionally
+    unresolved parameters and should not trigger validation errors.
+    """
+    table_ancestor = column.find_ancestor(exp.Table)
+    if table_ancestor and isinstance(table_ancestor.this, exp.Func):
+        # Column is inside a Table whose `this` is a Func (table-valued function)
+        # Check if the column is actually inside the function arguments
+        func_ancestor = column.find_ancestor(exp.Func)
+        if func_ancestor is table_ancestor.this:
+            return True
+    return False
 
 
 def _separate_pseudocolumns(scope: Scope, pseudocolumns: t.Set[str]) -> None:

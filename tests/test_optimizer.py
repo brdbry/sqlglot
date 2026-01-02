@@ -1039,6 +1039,25 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
         scope = build_scope(parse_one(sql, read="bigquery"))
         self.assertEqual(set(scope.selected_sources), {"t", "a1", "a2"})
 
+        # Test that columns inside table-valued function arguments are detected as external columns
+        # in correlated subqueries
+        sql = """
+        SELECT
+            (SELECT agg(t.elem) FROM table_func(properties) AS t(elem)) AS title
+        FROM outer_table
+        """
+        scopes = traverse_scope(parse_one(sql))
+        subquery_scope = scopes[0]
+        self.assertEqual(
+            [c.name for c in subquery_scope.external_columns],
+            ["properties"],
+            "Columns in table-valued function arguments should be detected as external columns",
+        )
+        self.assertTrue(
+            subquery_scope.is_correlated_subquery,
+            "Subquery with external column in table function arg should be correlated",
+        )
+
     @patch("sqlglot.optimizer.scope.logger")
     def test_scope_warning(self, logger):
         self.assertEqual(len(traverse_scope(parse_one("WITH q AS (@y) SELECT * FROM q"))), 1)

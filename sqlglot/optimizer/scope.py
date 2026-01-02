@@ -300,7 +300,15 @@ class Scope:
                     not ancestor
                     or column.table
                     or isinstance(ancestor, exp.Select)
-                    or (isinstance(ancestor, exp.Table) and not isinstance(ancestor.this, exp.Func))
+                    or (
+                        isinstance(ancestor, exp.Table)
+                        and (
+                            not isinstance(ancestor.this, exp.Func)
+                            # Include columns inside table-valued function arguments,
+                            # but exclude keyword argument names (left side of EQ)
+                            or (column.find_ancestor(exp.Func) and not _is_keyword_arg_name(column))
+                        )
+                    )
                     or (
                         isinstance(ancestor, (exp.Order, exp.Distinct))
                         and (
@@ -943,3 +951,21 @@ def _get_source_alias(expression):
         alias_name = alias_arg.columns[0].name
 
     return alias_name
+
+
+def _is_keyword_arg_name(column: exp.Column) -> bool:
+    """
+    Check if a column is a keyword argument name in a function call.
+
+    For example, in `READ_PARQUET('path', hive_partition=1)`, the column
+    `hive_partition` is the left side of an EQ expression, making it a
+    keyword argument name rather than a column reference.
+    """
+    parent = column.parent
+    if isinstance(parent, exp.EQ) and parent.this is column:
+        # Column is the left operand of an EQ (assignment/comparison)
+        # Check if this EQ is inside a function's arguments
+        func = parent.find_ancestor(exp.Func)
+        if func:
+            return True
+    return False
